@@ -1,0 +1,337 @@
+---
+title: "Coursera: Practical Machine Learning – Assignment"
+author: "Bharathi Subramaniam"
+date: "2024-04-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#Clear R environment
+rm(list = ls())
+#Load packages
+library(knitr)
+library(tidyverse)
+library(ISLR2)
+#library(ElemStatLearn)
+# library(kernlab)
+library(caret)
+library(Hmisc)
+library(rattle) 
+library(party) 
+library(randomForest) 
+library(gbm) 
+library(klaR) 
+library(corrplot)
+knitr::opts_chunk$set(echo = TRUE, warning = F)
+```
+
+```{r SeedSetting}
+#Set RNG/Seed to ensure comparability
+RNGversion("3.0.0")
+set.seed(1234)
+```
+
+```{r SettingsCutffs }
+#Cutoffs for feature selection
+missing_cutoff <- 0.9
+corr_cutoff    <- 0.8
+```
+
+# Background and aim
+In this assignment, accelerometer data are used to develop a machine learning algorithm to predict how well someone performs barebell lifts. Performance is measured via the categorical outcome "classe", ranging from A to E (5&nbsp;levels). The accelerometers data are from the belt, forearm, arm and dumbell of 6&nbsp;participants. Machine learning was applied to predict the outcome. 
+
+The provided testing-subset was used for validation. The provided training-dataset was subdivided into a training and testing set for model training.
+
+# Data preparation
+
+## Loading
+The data ("Weight Lifting Exercise Dataset") were provided by the Practical Machine Learning course, retrieved from: http://groupware.les.inf.puc-rio.br/har 
+
+```{r DataLoading}
+#Load data
+training <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"), 
+                      dec = ".")
+testing <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"))
+
+```
+
+## Reformatting
+
+During data set inspection it was noticeable that some columns columns with numeric variables were loaded as character variables (likely due to "#DIV/0!" entries interpreted as text). Thus, these columns were reformatted as numeric. Also, the outcome was set as a factor.
+
+```{r DatacleaningFormatting}
+training <- training %>%
+mutate_at(vars(kurtosis_roll_belt:magnet_forearm_z), as.numeric)
+training$classe <- factor(training$classe)
+ 
+testing <- testing %>%
+mutate_at(vars(kurtosis_roll_belt:magnet_forearm_z), as.numeric)
+ 
+```
+
+## Subsetting
+Given the relatively large sample size of the training data set (`r nrow(training)`&nbsp;rows), it was further divided into a testing and validation set (7 to 3 split).
+
+```{r Subsetting}
+#Set testing set aside before data are investigated
+inTrain <- createDataPartition(y = training$classe, 
+                               p = 0.7, list = FALSE)
+building_train <- training[inTrain, ]
+building_validation  <- training[-inTrain, ]
+
+```
+
+# Methods
+After basic formatting and subsetting of the data sets, the training data was inspected for variables which might provide insufficient information for model building: variables with high occurrence of missing data (10% or more) were removed from model building. Similarly, the "nearZeroVar" function of the caret package was used to detect variables those variance might be to low for model building. 
+
+As the primary aim is classification, tree-based methods (decision tree, random forest) were considered for model training.
+
+While only accelerometer data were meant for model building, the outcome distribution was compared for the 6 participants to rule out confounding. 
+Predictors were assessed for correlations to estimate if multicollinearity should be accounted for. If required, principal component analysis (PCA) was used to reduce dimensionality and computation time. 
+
+# Results
+
+## Removing variables
+On first glance, some columns appeared to have a lot of missing values. In practice, it is difficult to derive meaningful conclusions if large number of data are missing. Thus, before data were analyzed descriptively to determine a model building strategy, all columns with 10% or more missing values were removed for model building.
+
+```{r RemoveMissings}
+#Keep columns that have no more than 10% missing data
+building_train <- building_train[, which(colMeans(!is.na(building_train)) > missing_cutoff)]
+building_validation <- building_validation %>% 
+  dplyr::select(colnames(building_train))
+
+```
+ 
+Before the outcome was modeled using the accelerometer data, the outcome was checked for patterns regarding participants to gauge if the outcomes are balanced across participants and time points. 
+
+```{r PatternCheck, warning=F}
+the.groups <- c("user_name", "classe")
+
+overview <- building_train   %>% 
+    ungroup() %>% 
+    group_by(across(all_of(the.groups)),.drop=F) %>% 
+    tally()  %>%
+    dplyr::rename(Number = n )%>%
+    mutate(Perc. = Number / sum(Number)*100)  %>%  mutate_if(is.numeric,round,digits=1) 
+  total.n <<- sum(overview$Number)
+
+
+ my.plot <- ggplot(overview, 
+                    aes(x=as.factor(user_name), 
+                        y= Perc.,
+                        group = as.factor(user_name), 
+                        fill = classe,
+                        label = Perc.)
+                    )+
+    geom_bar(position = "fill", stat='identity', color="black") +
+    geom_text(aes(x=as.factor(user_name),
+                  y=Perc./100,
+                  label = Perc.),
+              size = 3,
+              position = position_stack(vjust = 0.5)
+              ) +
+    scale_y_continuous(labels=scales::percent) + 
+    theme_bw() + 
+    scale_fill_viridis_d(option = "C", begin = 0.4) +
+    xlab("Participant") +
+    ylab("%") +
+    ggtitle("Outcomes among participants (training data)")
+ 
+my.plot
+```
+
+Overall, outcomes appeared balanced across participants.
+
+## Feature selection
+
+For machine learning, only accelerometer data were considered. A correlation plot revealed that multiple features were correlated to each other. 
+
+```{r FirstCheck}
+#Select predictors
+the_predictors <- building_train %>%  dplyr::select(roll_belt:magnet_forearm_z)
+ 
+# the_outcome    <- building_train$classe
+cor_matrix <- cor(the_predictors)
+
+#Extract variables with high correlations
+highCorr <- findCorrelation(cor_matrix, cutoff = corr_cutoff)
+
+#Plot
+corrplot(cor_matrix, type = "upper", order = "hclust", 
+         tl.col = "black", tl.srt = 45, tl.cex = .5)
+
+
+
+
+```
+
+Of the `r ncol(the_predictors)`&nbsp;putative features for predictions, `r length(highCorr)` showed  pearson correlation coefficients of 0.8 or higher. Via the "findcorrelation()" function, highly correlated features were removed to increase robustness of the analysis.
+
+```{r RemoveCorrelated}
+old_predictor_count <- ncol(the_predictors)
+
+#Remove highly correlated predictors
+the_predictors <- the_predictors %>% dplyr::select(-findCorrelation(cor_matrix, cutoff = corr_cutoff))
+
+removal_n <- old_predictor_count - ncol(the_predictors)  
+rm(temp)
+```
+
+In total, `r removal_n`&nbsp;predictors were removed due to high correlations.
+
+```{r Nearzeroval, echo = T}
+#Check for columns without any values or low variability:
+near_zero_vars <- nearZeroVar(the_predictors)
+near_zero_vars <- colnames(building_train)[near_zero_vars] 
+length(near_zero_vars)
+```
+
+None of the features had near zero variance. Even after highly correlated variables were removed, the number of variables (`r ncol(the_predictors)`) was still  high in regards to the computation time for random forest algorithms. Thus, a decision tree was run first, as the algorithms has a lower computational time.
+ 
+# Model training
+
+## Appproach 1: Classifcation tree
+```{r ClassificationTree, dpi = 300}
+#create new data frame that has the selected features and the outcome
+temp <- the_predictors
+temp$classe <- building_train$classe
+
+#Run algorithm to create classification tree
+mod_fit <- train(classe ~ ., method = "rpart", data = temp, 
+                 preProcess = c("center", "scale")) 
+
+my.plot <- fancyRpartPlot(mod_fit$finalModel, palettes = "PuBuGn", 
+                          main = "Classification tree for classe", 
+                          sub = "")
+```
+
+The classification tree is easy to interpret and shows that 7&nbsp;features like "pitch_forearm" or "magnet_belt_y" are used to split the data. 
+
+```{r CheckAccuracyDecisionTree}
+#Predict on the validation set, check accuracy
+
+#First, reduce validation set to the same predictors as the training set
+selected_features <- colnames(the_predictors)
+the_newdata <- building_validation %>%  
+  dplyr::select(selected_features)
+
+classification_tree_predictions <- predict(mod_fit, newdata = the_newdata)
+
+#Determine accuracy
+rpart_accuracy <- confusionMatrix(building_validation$classe, classification_tree_predictions)
+rpart_accuracy_overall <- round(rpart_accuracy$overall[[1]], digits = 2)
+rpart_accuracy_lower <- round(rpart_accuracy$overall[[3]], digits = 2)
+rpart_accuracy_upper <- round(rpart_accuracy$overall[[4]], digits = 2)
+
+rpart_accuracy_summary <- paste0(rpart_accuracy_overall, " (95% CI ",rpart_accuracy_lower,"; ",rpart_accuracy_upper,")")
+
+```
+
+Applying the decision tree on the validation set showed a mediocre accuracy of `r rpart_accuracy_summary`. It is possible that the tree has issues with overfitting.  
+
+## Approach 2: Random forest 
+A random forest algorithm for training was applied as a second approach. To reduce computational time, the number of principal components (PC) had to be determined to balance model performance and computational time. To do so, the cumulative variance explained by the number of PCs was assessed graphically. 
+
+```{r PCAComponent}
+#Run a PCA to generate PCs, data are centered and scaled
+pca_results <- prcomp(the_predictors, center = T,  scale. = TRUE)
+
+#Calculate variance for each PC
+pca_variances <- (pca_results$sdev)^2
+
+#Calculate the cumulative variance explained of the PCs, save that in a data frame
+cumulative_percent <- cumsum(pca_variances / sum(pca_variances))
+df_pca <- data.frame(PCs = c(1:length(pca_variances)),
+                     Percent = cumulative_percent
+                     )
+#Plot the results to get an idea how many PCs are required 
+pc_plot <- ggplot(df_pca,
+       aes(x=PCs, y = Percent)) +
+  geom_point() +
+  theme_bw() + 
+  ggtitle("Cumulative variance explained by PCs") +
+  xlab("Number of principal components") + 
+  ylab("%")+
+  geom_hline(yintercept = 0.70, linetype  = "dashed", color = "red")+
+  scale_y_continuous(labels=scales::percent)
+# pca_analysis$sdev
+ 
+pc_plot
+```
+
+In total, 9 PCs were required to explain at least 70% of the variance. Given the computational time for random forest algorithms, the 70% variance threshold was chosen for PCA preprocessing.
+
+```{r PCAPreprocessing}
+pre_proc <- preProcess(x = the_predictors,
+                          method = "pca"#, pcaComp = 3,
+                          ,thresh = 0.70)
+
+#Use this pre-processing on the training data to calculate PC values
+training_pc <- predict(pre_proc, the_predictors)
+```
+
+```{r RFModelFitting}
+#After the pre-processing, use the new features (i.e., PC-values) to train a model fit for the outcome
+#nearly 10 min processing time
+modelFit <- train(x = training_pc, y = building_train$classe,
+                  method="rf")
+
+#Prediction on the validation set:
+
+#Re-use the validation data set with the selected features (the_newdata) and calculate PCs
+validation_pc <- predict(object = pre_proc, the_newdata )
+
+#predict the classe for the validation set 
+validation_predictions <- predict(modelFit, validation_pc)
+
+#Determine accuracy
+rf_accuracy <- confusionMatrix(building_validation$classe, validation_predictions)
+
+rf_matrix <- rf_accuracy$table
+rf_accuracy_overall <- round(rf_accuracy$overall[[1]], digits = 2)
+rf_accuracy_lower <- round(rf_accuracy$overall[[3]], digits = 2)
+rf_accuracy_upper <- round(rf_accuracy$overall[[4]], digits = 2)
+
+rf_accuracy_summary <- paste0(rf_accuracy_overall, " (95% CI ",rf_accuracy_lower,"; ",rf_accuracy_upper,")")
+
+```
+
+Compared to the decision tree, the random forest training showed a higher accuracy of `r rf_accuracy_summary`. The confusion matrix is shown below:
+ 
+```{r rfmatrix, echo=FALSE}
+kable(rf_matrix, caption = "Confusion matrix for the random forest approach (validation data set).")
+ 
+```
+# Prediction on test set
+The calculated algorithm created with the random forest approach was used to predict the classe for the test data. 
+
+```{r Prediction}
+#PreProcess the test data via pc
+
+#First, reduce test set to the same predictors as the training set
+selected_features <- colnames(the_predictors)
+new_testing <- testing %>%  
+  dplyr::select(selected_features)
+
+#Calculate PCs for testing data
+test_pc <- predict(object = pre_proc, new_testing )
+
+#predict the classe for the testing set 
+testing_predictions <- predict(modelFit, test_pc)
+
+#Get the most common predictions
+most_common <- data.frame(sort(table(testing_predictions),decreasing=TRUE) )
+most_common_first <- most_common$testing_predictions[1]
+most_common_first_n <- most_common$Freq[1]
+most_common_second <- most_common$testing_predictions[2]
+most_common_second_n <- most_common$Freq[2]
+```
+
+The algorithm predicted that most of the entries in the testing set had either a performance of classe `r most_common_first` (`r most_common_first_n`) or `r most_common_second` (`r most_common_second_n`). Expecting that the out of sample-error will be higher than the accuracy detertmined during model building, I assume about a 10% out of sample error.
+
+```{r PrintFinalTable}
+#Create data frame that combines participants, timestampes and prediction into a single data frame for a summary
+df_prediction <- testing %>%  dplyr::select(problem_id, user_name)
+df_prediction$`Classe prediction` <- testing_predictions
+knitr::kable(df_prediction, caption = "Predictions for testing set.")
+```
